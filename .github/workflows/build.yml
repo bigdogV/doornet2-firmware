@@ -26,13 +26,26 @@ jobs:
         working-directory: openwrt
         run: |
           set -euxo pipefail
-          sed -i '/^[[:space:]]*src-git[[:space:]]\+\(telephony\|istore\)[[:space:]]/d' feeds.conf.default
+          sed -i '/^[[:space:]]*src-git[[:space:]]\+\(telephony\)[[:space:]]/d' feeds.conf.default
           ./scripts/feeds update -a
           for name in luci-app-passwall luci-app-passwall2; do
             while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name "$name" -prune)
           done
           printf '%s\n' 'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' >> feeds.conf.default
           ./scripts/feeds update passwall_packages passwall_luci
+          git clone --depth 1 --branch main https://github.com/linkease/nas-packages-luci.git /tmp/doornet2-nas-luci
+          git clone --depth 1 --branch master https://github.com/linkease/nas-packages.git /tmp/doornet2-nas-packages
+          mkdir -p package/doornet2-extra
+          cp -a /tmp/doornet2-nas-luci/luci/luci-app-quickstart package/doornet2-extra/
+          cp -a /tmp/doornet2-nas-packages/network/services/quickstart package/doornet2-extra/
+          # Replace the old Go 1.23 recipe with the official monolithic Go 1.25.6 recipe.
+          git init /tmp/doornet2-go-feed
+          git -C /tmp/doornet2-go-feed remote add origin https://github.com/openwrt/packages.git
+          git -C /tmp/doornet2-go-feed sparse-checkout set lang/golang
+          git -C /tmp/doornet2-go-feed fetch --depth 1 origin dbaeeb38d3df5f7b8c78ff23e558d2eab5b0a895
+          git -C /tmp/doornet2-go-feed checkout --detach FETCH_HEAD
+          rm -rf feeds/packages/lang/golang
+          cp -a /tmp/doornet2-go-feed/lang/golang feeds/packages/lang/golang
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
@@ -89,7 +102,7 @@ jobs:
           CONFIG_PACKAGE_ppp-mod-pppoe=y
           CONFIG_PACKAGE_luci-proto-ppp=y
           CONFIG
-          for app in passwall firewall turboacc uugamebooster; do
+          for app in passwall firewall turboacc uugamebooster quickstart store; do
             echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
           done
           mkdir -p build-metadata
@@ -98,9 +111,9 @@ jobs:
           python3 - <<'PYCONFIG'
           from pathlib import Path
           import re
-          allow=set('passwall firewall turboacc uugamebooster'.split())
+          allow=set('passwall firewall turboacc uugamebooster quickstart store'.split())
           luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
-          blocked=set('odhcp6c odhcpd-ipv6only quickstart taskd luci-lib-taskd luci-lib-xterm ttyd sqm-scripts miniupnpd cpufreq automount htop cfdisk mkf2fs smartmontools smartd smartmontools-drivedb mdadm parted autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
+          blocked=set('odhcp6c odhcpd-ipv6only sqm-scripts miniupnpd cpufreq automount htop cfdisk mkf2fs autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
           lines=Path('.config').read_text().splitlines()
           result=[]
           for line in lines:
@@ -131,12 +144,12 @@ jobs:
           Path('build-metadata/unavailable-packages.txt').write_text(chr(10).join(missing)+chr(10))
           if missing:
               raise SystemExit('Unavailable packages: '+', '.join(missing))
-          allowed=set('passwall firewall turboacc uugamebooster'.split())
+          allowed=set('passwall firewall turboacc uugamebooster quickstart store'.split())
           luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
           unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_'):-2] in luci_packages and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
           if unexpected:
               raise SystemExit('Unexpected plugins in slim image: '+', '.join(unexpected))
-          forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba','quickstart','ttyd','sqm-scripts')
+          forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba','sqm-scripts')
           if any('CONFIG_PACKAGE_'+x+'=y' in actual for x in forbidden):
               raise SystemExit('Unwanted Docker or sharing dependency selected')
           PY
