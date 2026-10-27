@@ -26,7 +26,7 @@ jobs:
         working-directory: openwrt
         run: |
           set -euxo pipefail
-          sed -i '/^[[:space:]]*src-git[[:space:]]\+telephony[[:space:]]/d' feeds.conf.default
+          sed -i '/^[[:space:]]*src-git[[:space:]]\+\(telephony\|istore\)[[:space:]]/d' feeds.conf.default
           ./scripts/feeds update -a
           for name in luci-app-passwall luci-app-passwall2; do
             while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name "$name" -prune)
@@ -36,20 +36,6 @@ jobs:
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
-      - name: Add official QuickStart homepage
-        working-directory: openwrt
-        run: |
-          set -euxo pipefail
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/linkease/nas-packages-luci.git quickstart-ui
-          git -C quickstart-ui sparse-checkout set luci/luci-app-quickstart
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/linkease/nas-packages.git quickstart-backend
-          git -C quickstart-backend sparse-checkout set network/services/quickstart
-          mkdir -p package/custom build-metadata
-          cp -a quickstart-ui/luci/luci-app-quickstart package/custom/
-          cp -a quickstart-backend/network/services/quickstart package/custom/
-          ./scripts/feeds install -f -p istore luci-app-store
-          git -C quickstart-ui rev-parse HEAD > build-metadata/quickstart-ui-revision.txt
-          git -C quickstart-backend rev-parse HEAD > build-metadata/quickstart-backend-revision.txt
       - name: Configure DoorNet2 and verify all requested plugins
         working-directory: openwrt
         run: |
@@ -67,8 +53,11 @@ jobs:
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_xray-core=y
           CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_luci-proto-ppp=y
           CONFIG
-          for app in passwall firewall upnp arpbind cpufreq diskman ttyd turboacc sqm uugamebooster quickstart store; do
+          for app in passwall firewall turboacc uugamebooster; do
             echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
           done
           mkdir -p build-metadata
@@ -77,8 +66,8 @@ jobs:
           python3 - <<'PYCONFIG'
           from pathlib import Path
           import re
-          allow=set('passwall firewall upnp arpbind cpufreq diskman ttyd turboacc sqm uugamebooster quickstart store'.split())
-          blocked=set('autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
+          allow=set('passwall firewall turboacc uugamebooster'.split())
+          blocked=set('odhcp6c odhcpd-ipv6only quickstart taskd luci-lib-taskd luci-lib-xterm ttyd sqm-scripts miniupnpd cpufreq automount htop cfdisk mkf2fs smartmontools smartd smartmontools-drivedb mdadm parted autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
           lines=Path('.config').read_text().splitlines()
           result=[]
           for line in lines:
@@ -108,11 +97,11 @@ jobs:
           Path('build-metadata/unavailable-packages.txt').write_text(chr(10).join(missing)+chr(10))
           if missing:
               raise SystemExit('Unavailable packages: '+', '.join(missing))
-          allowed=set('passwall firewall upnp arpbind cpufreq diskman ttyd turboacc sqm uugamebooster quickstart store'.split())
+          allowed=set('passwall firewall turboacc uugamebooster'.split())
           unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
           if unexpected:
               raise SystemExit('Unexpected plugins in slim image: '+', '.join(unexpected))
-          forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba')
+          forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba','quickstart','ttyd','sqm-scripts')
           if any('CONFIG_PACKAGE_'+x+'=y' in actual for x in forbidden):
               raise SystemExit('Unwanted Docker or sharing dependency selected')
           PY
@@ -124,6 +113,9 @@ jobs:
           net.ipv6.conf.all.disable_ipv6=1
           net.ipv6.conf.default.disable_ipv6=1
           net.ipv6.conf.all.forwarding=0
+          net.ipv6.conf.default.forwarding=0
+          net.ipv6.conf.all.accept_ra=0
+          net.ipv6.conf.default.accept_ra=0
           SYSCTL
           cat > files/etc/uci-defaults/99-local-settings <<'UCI'
           #!/bin/sh
@@ -164,7 +156,7 @@ jobs:
           manifest=$(find "$target" -maxdepth 1 -name '*embedfire_doornet2*.manifest' -print -quit)
           test -n "$manifest"
           cp "$manifest" build-metadata/installed-packages.manifest
-          grep -E '^(luci-app-|xray-core |quickstart |uugamebooster )' "$manifest" > build-metadata/plugin-versions.txt
+          grep -E '^(luci-app-|xray-core |uugamebooster |ppp |ppp-mod-pppoe )' "$manifest" > build-metadata/plugin-versions.txt
           {
             echo '## DoorNet2 daily build'
             echo 'Sources and plugin feeds were fetched fresh for this run.'
