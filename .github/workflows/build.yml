@@ -1,0 +1,134 @@
+name: DoorNet2 firmware
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev file wget curl ca-certificates time subversion patch cmake ninja-build libelf-dev device-tree-compiler cpio genisoimage qemu-utils help2man libtool-bin autoconf automake autopoint gperf texinfo uglifyjs antlr3 asciidoc libfuse-dev
+      - name: Clone sources
+        run: git clone --depth 1 --branch stable https://github.com/DHDAXCW/lede-rockchip.git openwrt
+      - name: Update plugin sources
+        working-directory: openwrt
+        run: |
+          set -euxo pipefail
+          ./scripts/feeds update -a
+          for name in luci-app-passwall luci-app-passwall2; do
+            while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name "$name" -prune)
+          done
+          printf '
+src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
+src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main
+' >> feeds.conf.default
+          ./scripts/feeds update passwall_packages passwall_luci passwall2
+          ./scripts/feeds install -a
+          ./scripts/feeds install -f -a -p passwall_packages
+          ./scripts/feeds install -f -p passwall_luci luci-app-passwall
+          ./scripts/feeds install -f -p passwall2 luci-app-passwall2
+      - name: Configure DoorNet2 and verify all requested plugins
+        working-directory: openwrt
+        run: |
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_rockchip=y
+          CONFIG_TARGET_rockchip_armv8=y
+          CONFIG_TARGET_rockchip_armv8_DEVICE_embedfire_doornet2=y
+          CONFIG_TARGET_KERNEL_PARTSIZE=64
+          CONFIG_TARGET_ROOTFS_PARTSIZE=2048
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG
+          for app in accesscontrol adbyby-plus adguardhome airplay2 alist aliyundrive-webdav argon-config aria2 arpbind autoreboot cifs-mount commands cpufreq ddns ddnsto diskman dockerman eqos fileassistant filebrowser filetransfer firewall frpc frps gowebdav guest-wifi haproxy-tcp hd-idle ikoolproxy ipsec-server irqbalance kodexplorer minidlna music-remote-center mwan3 mwan3helper netdata nfs nlbwmon nps oaf openclash openvpn-server passwall passwall2 poweroff pptp-server ps3netsrv pushbot qbittorrent rclone samba4 shairplay smartdns socat softethervpn sqm ssr-mudb-server ssr-plus syncdial tinyproxy transmission ttyd turboacc udpxy unblockneteasemusic upnp usb-printer uugamebooster vlmcsd vsftpd vssr webadmin wifischedule wireguard wol wrtbwmon xlnetacc zerotier; do
+            echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
+          done
+          mkdir -p build-metadata
+          cp .config build-metadata/requested.config
+          make defconfig
+          cp .config build-metadata/resolved.config
+          ./scripts/diffconfig.sh > build-metadata/diffconfig
+          git rev-parse HEAD > build-metadata/source-revisions.txt
+          for f in feeds/*; do
+            if test -d "$f/.git"; then
+              echo "$f $(git -C "$f" rev-parse HEAD)" >> build-metadata/source-revisions.txt
+            fi
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          wanted=[x for x in Path('build-metadata/requested.config').read_text().splitlines() if x.startswith('CONFIG_PACKAGE_') and x.endswith('=y')]
+          actual=set(Path('.config').read_text().splitlines())
+          missing=[x for x in wanted if x not in actual]
+          Path('build-metadata/unavailable-packages.txt').write_text('
+'.join(missing)+'
+')
+          if missing:
+              raise SystemExit('Unavailable packages: '+', '.join(missing))
+          PY
+      - name: Set LAN address and disable IPv6
+        working-directory: openwrt
+        run: |
+          mkdir -p files/etc/uci-defaults files/etc/sysctl.d
+          cat > files/etc/sysctl.d/99-disable-ipv6.conf <<'SYSCTL'
+          net.ipv6.conf.all.disable_ipv6=1
+          net.ipv6.conf.default.disable_ipv6=1
+          net.ipv6.conf.all.forwarding=0
+          SYSCTL
+          cat > files/etc/uci-defaults/99-local-settings <<'UCI'
+          #!/bin/sh
+          uci set network.lan.ipaddr='192.168.11.1'
+          uci -q delete network.lan.ip6assign
+          uci -q delete network.globals.ula_prefix
+          uci set network.wan.ipv6='0'
+          uci set network.wan.delegate='0'
+          uci -q delete network.wan6
+          uci set dhcp.lan.ra='disabled'
+          uci set dhcp.lan.dhcpv6='disabled'
+          uci set dhcp.lan.ndp='disabled'
+          uci set dhcp.lan.ra_slaac='0'
+          uci -q delete dhcp.lan.ra_flags
+          uci set dhcp.@dnsmasq[0].filter_aaaa='1'
+          uci commit network
+          uci commit dhcp
+          /etc/init.d/odhcpd disable
+          exit 0
+          UCI
+          chmod +x files/etc/uci-defaults/99-local-settings
+      - name: Download
+        working-directory: openwrt
+        run: make download -j8
+      - name: Build
+        working-directory: openwrt
+        run: |
+          set -o pipefail
+          make -j2 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoorNet2-build-diagnostics
+          path: |
+            openwrt/build-metadata/
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 14
+      - name: Upload firmware and packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoorNet2-firmware
+          path: |
+            openwrt/bin/targets/rockchip/armv8/
+            openwrt/bin/packages/
+          retention-days: 14
