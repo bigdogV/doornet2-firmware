@@ -1,8 +1,14 @@
 name: DoorNet2 firmware
 on:
   workflow_dispatch:
+  schedule:
+    # 04:00 Asia/Shanghai = 20:00 UTC on the previous day
+    - cron: '0 20 * * *'
 permissions:
   contents: read
+concurrency:
+  group: doornet2-firmware
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -147,6 +153,28 @@ jobs:
         run: |
           set -o pipefail
           make -j2 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
+      - name: Verify images and record package versions
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+          target=bin/targets/rockchip/armv8
+          find "$target" -maxdepth 1 -type f -name '*embedfire_doornet2*.img*' | tee build-metadata/firmware-files.txt
+          test -s build-metadata/firmware-files.txt
+          test -s "$target/sha256sums"
+          manifest=$(find "$target" -maxdepth 1 -name '*embedfire_doornet2*.manifest' -print -quit)
+          test -n "$manifest"
+          cp "$manifest" build-metadata/installed-packages.manifest
+          grep -E '^(luci-app-|xray-core |quickstart |uugamebooster )' "$manifest" > build-metadata/plugin-versions.txt
+          {
+            echo '## DoorNet2 daily build'
+            echo 'Sources and plugin feeds were fetched fresh for this run.'
+            echo 'Schedule: daily at 04:00 Asia/Shanghai (20:00 UTC).'
+            echo '### Package versions'
+            echo '```text'
+            cat build-metadata/plugin-versions.txt
+            echo '```'
+            echo 'Download the DoorNet2-firmware artifact; flash manually after review.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -161,6 +189,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: DoorNet2-firmware
+          if-no-files-found: error
           path: |
             openwrt/bin/targets/rockchip/armv8/
             openwrt/bin/packages/
