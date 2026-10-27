@@ -36,6 +36,38 @@ jobs:
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
+      - name: Refresh UU from official API and verify download
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYUU'
+          import urllib.request, json, hashlib, re
+          from pathlib import Path
+          info=json.load(urllib.request.urlopen('https://router.uu.163.com/api/plugin?type=openwrt-aarch64',timeout=60))
+          assert info['status']=='ok', info
+          data=None
+          for key in ('url','url_bak'):
+              url=info.get(key,'').replace('http://','https://',1)
+              if not url: continue
+              try:
+                  payload=urllib.request.urlopen(url,timeout=90).read()
+                  if hashlib.md5(payload).hexdigest()!=info['md5']: raise ValueError('UU checksum mismatch')
+                  data=payload
+                  break
+              except Exception as e: print('UU download retry:',type(e).__name__)
+          if data is None: raise RuntimeError('Official UU downloads unavailable')
+          version=re.search(r'/v([0-9.]+)/',url)[1]
+          sha=hashlib.sha256(data).hexdigest()
+          p=Path('feeds/packages/net/uugamebooster/Makefile')
+          text=p.read_text()
+          text=re.sub(r'^PKG_VERSION:=.*$', 'PKG_VERSION:='+version,text,flags=re.M)
+          text=re.sub(r'^  PKG_HASH:=.*$', '  PKG_HASH:='+sha,text,count=1,flags=re.M)
+          p.write_text(text)
+          Path('dl').mkdir(exist_ok=True)
+          Path('dl/uugamebooster-'+version+'-aarch64.tar.gz').write_bytes(data)
+          Path('build-metadata').mkdir(exist_ok=True)
+          Path('build-metadata/uu-source.txt').write_text('Official API: openwrt-aarch64\nVersion: '+version+'\nSHA256: '+sha+'\n')
+          print('Verified official UU',version,sha)
+          PYUU
       - name: Configure DoorNet2 and verify all requested plugins
         working-directory: openwrt
         run: |
