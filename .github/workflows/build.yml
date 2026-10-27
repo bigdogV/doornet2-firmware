@@ -13,7 +13,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev file wget curl ca-certificates time subversion patch cmake ninja-build libelf-dev device-tree-compiler cpio genisoimage qemu-utils help2man libtool-bin autoconf automake autopoint gperf texinfo uglifyjs antlr3 asciidoc libfuse-dev
+          sudo apt-get install -y --no-install-recommends build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev file wget curl ca-certificates time subversion patch cmake ninja-build libelf-dev device-tree-compiler cpio genisoimage qemu-utils help2man libtool-bin autoconf automake autopoint gperf texinfo uglifyjs antlr3 asciidoc libfuse-dev
       - name: Clone sources
         run: git clone --depth 1 --branch stable https://github.com/DHDAXCW/lede-rockchip.git openwrt
       - name: Update plugin sources
@@ -25,20 +25,25 @@ jobs:
           for name in luci-app-passwall luci-app-passwall2; do
             while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name "$name" -prune)
           done
-          printf '%s\n' 'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' 'src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
-          ./scripts/feeds update passwall_packages passwall_luci passwall2
+          printf '%s\n' 'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' >> feeds.conf.default
+          ./scripts/feeds update passwall_packages passwall_luci
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
-          ./scripts/feeds install -f -p passwall2 luci-app-passwall2
-      - name: Add upstream SSR Plus
+      - name: Add official QuickStart homepage
         working-directory: openwrt
         run: |
-          printf '%s\n' 'src-git helloworld https://github.com/fw876/helloworld.git;master' >> feeds.conf.default
-          ./scripts/feeds update helloworld
-          ./scripts/feeds install -f -p helloworld luci-app-ssr-plus shadowsocksr-libev
-          mkdir -p build-metadata
-          git -C feeds/helloworld rev-parse HEAD > build-metadata/ssrplus-source-revision.txt
+          set -euxo pipefail
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/linkease/nas-packages-luci.git quickstart-ui
+          git -C quickstart-ui sparse-checkout set luci/luci-app-quickstart
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/linkease/nas-packages.git quickstart-backend
+          git -C quickstart-backend sparse-checkout set network/services/quickstart
+          mkdir -p package/custom build-metadata
+          cp -a quickstart-ui/luci/luci-app-quickstart package/custom/
+          cp -a quickstart-backend/network/services/quickstart package/custom/
+          ./scripts/feeds install -f -p istore luci-app-store
+          git -C quickstart-ui rev-parse HEAD > build-metadata/quickstart-ui-revision.txt
+          git -C quickstart-backend rev-parse HEAD > build-metadata/quickstart-backend-revision.txt
       - name: Configure DoorNet2 and verify all requested plugins
         working-directory: openwrt
         run: |
@@ -57,11 +62,29 @@ jobs:
           CONFIG_PACKAGE_xray-core=y
           CONFIG_PACKAGE_e2fsprogs=y
           CONFIG
-          for app in accesscontrol adbyby-plus airplay2 aliyundrive-webdav argon-config aria2 arpbind autoreboot cifs-mount commands cpufreq ddns diskman dockerman eqos filetransfer firewall frpc frps guest-wifi haproxy-tcp hd-idle ipsec-server kodexplorer minidlna music-remote-center mwan3 mwan3helper netdata nfs nlbwmon nps openvpn-server passwall passwall2 pptp-server ps3netsrv pushbot qbittorrent rclone samba4 shairplay smartdns socat softethervpn sqm ssr-plus syncdial tinyproxy transmission ttyd turboacc udpxy upnp usb-printer uugamebooster vlmcsd vsftpd webadmin wifischedule wireguard wol wrtbwmon xlnetacc zerotier; do
+          for app in passwall firewall upnp arpbind cpufreq diskman ttyd turboacc sqm uugamebooster quickstart store; do
             echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
           done
           mkdir -p build-metadata
           cp .config build-metadata/requested.config
+          make defconfig
+          python3 - <<'PYCONFIG'
+          from pathlib import Path
+          import re
+          allow=set('passwall firewall upnp arpbind cpufreq diskman ttyd turboacc sqm uugamebooster quickstart store'.split())
+          blocked=set('autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
+          lines=Path('.config').read_text().splitlines()
+          result=[]
+          for line in lines:
+              m=re.match(r'CONFIG_PACKAGE_(.*?)=[ym]$',line)
+              if m and ((m[1].startswith('luci-app-') and m[1][9:] not in allow) or m[1] in blocked):
+                  line='# CONFIG_PACKAGE_'+m[1]+' is not set'
+              result.append(line)
+          for name in blocked:
+              if not any('CONFIG_PACKAGE_'+name+' ' in x or x.startswith('CONFIG_PACKAGE_'+name+'=') for x in result):
+                  result.append('# CONFIG_PACKAGE_'+name+' is not set')
+          Path('.config').write_text(chr(10).join(result)+chr(10))
+          PYCONFIG
           make defconfig
           cp .config build-metadata/resolved.config
           ./scripts/diffconfig.sh > build-metadata/diffconfig
@@ -79,6 +102,13 @@ jobs:
           Path('build-metadata/unavailable-packages.txt').write_text(chr(10).join(missing)+chr(10))
           if missing:
               raise SystemExit('Unavailable packages: '+', '.join(missing))
+          allowed=set('passwall firewall upnp arpbind cpufreq diskman ttyd turboacc sqm uugamebooster quickstart store'.split())
+          unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
+          if unexpected:
+              raise SystemExit('Unexpected plugins in slim image: '+', '.join(unexpected))
+          forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba')
+          if any('CONFIG_PACKAGE_'+x+'=y' in actual for x in forbidden):
+              raise SystemExit('Unwanted Docker or sharing dependency selected')
           PY
       - name: Set LAN address and disable IPv6
         working-directory: openwrt
