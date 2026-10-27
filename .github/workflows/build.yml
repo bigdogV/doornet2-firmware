@@ -67,12 +67,13 @@ jobs:
           from pathlib import Path
           import re
           allow=set('passwall firewall turboacc uugamebooster'.split())
+          luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
           blocked=set('odhcp6c odhcpd-ipv6only quickstart taskd luci-lib-taskd luci-lib-xterm ttyd sqm-scripts miniupnpd cpufreq automount htop cfdisk mkf2fs smartmontools smartd smartmontools-drivedb mdadm parted autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
           lines=Path('.config').read_text().splitlines()
           result=[]
           for line in lines:
               m=re.match(r'CONFIG_PACKAGE_(.*?)=[ym]$',line)
-              if m and ((m[1].startswith('luci-app-') and m[1][9:] not in allow) or m[1] in blocked):
+              if m and ((m[1] in luci_packages and m[1][9:] not in allow) or m[1] in blocked):
                   line='# CONFIG_PACKAGE_'+m[1]+' is not set'
               result.append(line)
           for name in blocked:
@@ -91,6 +92,7 @@ jobs:
           done
           python3 - <<'PY'
           from pathlib import Path
+          import re
           wanted=[x for x in Path('build-metadata/requested.config').read_text().splitlines() if x.startswith('CONFIG_PACKAGE_') and x.endswith('=y')]
           actual=set(Path('.config').read_text().splitlines())
           missing=[x for x in wanted if x not in actual]
@@ -98,7 +100,8 @@ jobs:
           if missing:
               raise SystemExit('Unavailable packages: '+', '.join(missing))
           allowed=set('passwall firewall turboacc uugamebooster'.split())
-          unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
+          luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
+          unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_'):-2] in luci_packages and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
           if unexpected:
               raise SystemExit('Unexpected plugins in slim image: '+', '.join(unexpected))
           forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba','quickstart','ttyd','sqm-scripts')
