@@ -46,6 +46,23 @@ jobs:
           git -C /tmp/doornet2-go-feed checkout --detach FETCH_HEAD
           rm -rf feeds/packages/lang/golang
           cp -a /tmp/doornet2-go-feed/lang/golang feeds/packages/lang/golang
+          # Xray 26.10.21 requires Go 1.27; use verified official source and bootstrap.
+          curl -fL --retry 5 https://go.dev/dl/go1.27.3.linux-amd64.tar.gz -o /tmp/doornet2-go-bootstrap.tar.gz
+          echo '65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40  /tmp/doornet2-go-bootstrap.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/doornet2-go-bootstrap
+          tar -xzf /tmp/doornet2-go-bootstrap.tar.gz -C /tmp/doornet2-go-bootstrap --strip-components=1
+          python3 - <<'PYGO'
+          from pathlib import Path
+          import re
+          p=Path('feeds/packages/lang/golang/golang/Makefile')
+          text=p.read_text().replace('GO_VERSION_MAJOR_MINOR:=1.25','GO_VERSION_MAJOR_MINOR:=1.27').replace('GO_VERSION_PATCH:=6','GO_VERSION_PATCH:=3')
+          text=re.sub(r'^PKG_HASH:=.*$', 'PKG_HASH:=6e7749035cf360f06b2575d162ea79df9fda8ef671889e5c375f8e50777f26bb',text,flags=re.M)
+          start=text.index('define Host/Compile')
+          end=text.index('endef',start)+len('endef')
+          host='define Host/Compile'+chr(10)+chr(9)+'$(call GoCompiler/Host/Make, GOROOT_BOOTSTRAP="/tmp/doornet2-go-bootstrap" $(HOST_GO_VARS))'+chr(10)+'endef'
+          text=text[:start]+host+text[end:]
+          p.write_text(text)
+          PYGO
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
