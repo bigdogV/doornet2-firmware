@@ -20,6 +20,7 @@ jobs:
         working-directory: openwrt
         run: |
           set -euxo pipefail
+          sed -i '/^[[:space:]]*src-git[[:space:]]\+telephony[[:space:]]/d' feeds.conf.default
           ./scripts/feeds update -a
           for name in luci-app-passwall luci-app-passwall2; do
             while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name "$name" -prune)
@@ -30,6 +31,14 @@ jobs:
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
           ./scripts/feeds install -f -p passwall2 luci-app-passwall2
+      - name: Add upstream SSR Plus
+        working-directory: openwrt
+        run: |
+          printf '%s\n' 'src-git helloworld https://github.com/fw876/helloworld.git;master' >> feeds.conf.default
+          ./scripts/feeds update helloworld
+          ./scripts/feeds install -f -p helloworld luci-app-ssr-plus shadowsocksr-libev
+          mkdir -p build-metadata
+          git -C feeds/helloworld rev-parse HEAD > build-metadata/ssrplus-source-revision.txt
       - name: Configure DoorNet2 and verify all requested plugins
         working-directory: openwrt
         run: |
@@ -48,7 +57,7 @@ jobs:
           CONFIG_PACKAGE_xray-core=y
           CONFIG_PACKAGE_e2fsprogs=y
           CONFIG
-          for app in accesscontrol adbyby-plus adguardhome airplay2 alist aliyundrive-webdav argon-config aria2 arpbind autoreboot cifs-mount commands cpufreq ddns ddnsto diskman dockerman eqos fileassistant filebrowser filetransfer firewall frpc frps gowebdav guest-wifi haproxy-tcp hd-idle ikoolproxy ipsec-server irqbalance kodexplorer minidlna music-remote-center mwan3 mwan3helper netdata nfs nlbwmon nps oaf openclash openvpn-server passwall passwall2 poweroff pptp-server ps3netsrv pushbot qbittorrent rclone samba4 shairplay smartdns socat softethervpn sqm ssr-mudb-server ssr-plus syncdial tinyproxy transmission ttyd turboacc udpxy unblockneteasemusic upnp usb-printer uugamebooster vlmcsd vsftpd vssr webadmin wifischedule wireguard wol wrtbwmon xlnetacc zerotier; do
+          for app in accesscontrol adbyby-plus airplay2 aliyundrive-webdav argon-config aria2 arpbind autoreboot cifs-mount commands cpufreq ddns diskman dockerman eqos filetransfer firewall frpc frps guest-wifi haproxy-tcp hd-idle ipsec-server kodexplorer minidlna music-remote-center mwan3 mwan3helper netdata nfs nlbwmon nps openvpn-server passwall passwall2 pptp-server ps3netsrv pushbot qbittorrent rclone samba4 shairplay smartdns socat softethervpn sqm ssr-plus syncdial tinyproxy transmission ttyd turboacc udpxy upnp usb-printer uugamebooster vlmcsd vsftpd webadmin wifischedule wireguard wol wrtbwmon xlnetacc zerotier; do
             echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
           done
           mkdir -p build-metadata
