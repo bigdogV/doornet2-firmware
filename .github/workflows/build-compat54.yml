@@ -1,0 +1,338 @@
+name: DoorNet2 5.4 compatibility test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: doornet2-firmware
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev file wget curl ca-certificates time subversion patch cmake ninja-build libelf-dev device-tree-compiler cpio genisoimage qemu-utils help2man libtool-bin autoconf automake autopoint gperf texinfo uglifyjs antlr3 asciidoc libfuse-dev
+      - name: Clone sources
+        run: |
+          git init openwrt
+          git -C openwrt remote add origin https://github.com/DHDAXCW/lede-rockchip.git
+          git -C openwrt fetch --depth 1 origin 8fef2b41b624dedf12c631838cf07fb5fcb7615f
+          git -C openwrt checkout --detach FETCH_HEAD
+      - name: Repair legacy kernel version parser and verify board baseline
+        working-directory: openwrt
+        run: |
+          set -euxo pipefail
+          # The original 5.4 branch accidentally duplicated/truncated this generic parser.
+          # Reuse the clean parser from the same author's stable tree, keeping 5.4 kernel/board files.
+          git fetch --depth 1 origin b9d5e7f19e9b831c2247577f529c0d6a4fc4a169
+          git show FETCH_HEAD:include/kernel-version.mk > include/kernel-version.mk
+          mkdir -p build-metadata
+          cp include/kernel-5.4 build-metadata/kernel-source.txt
+          cp target/linux/rockchip/patches-5.4/205-rockchip-rk3399-Add-support-for-EmbedFire-DoorNet2.patch build-metadata/doornet2-board.patch
+          grep -q 'KERNEL_PATCHVER=5.4' target/linux/rockchip/Makefile
+          grep -q 'LINUX_VERSION-5.4 = .192' include/kernel-5.4
+          grep -q 'tx_delay = <0x13>' build-metadata/doornet2-board.patch
+          grep -q 'rx_delay = <0x0e>' build-metadata/doornet2-board.patch
+          printf '%s\n' 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
+      - name: Update plugin sources
+        working-directory: openwrt
+        run: |
+          set -euxo pipefail
+          sed -i '/^[[:space:]]*src-git[[:space:]]\+\(telephony\)[[:space:]]/d' feeds.conf.default
+          ./scripts/feeds update -a
+          for name in luci-app-passwall luci-app-passwall2; do
+            while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name "$name" -prune)
+          done
+          printf '%s\n' 'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' >> feeds.conf.default
+          ./scripts/feeds update passwall_packages passwall_luci
+          git clone --depth 1 --branch main https://github.com/linkease/nas-packages-luci.git /tmp/doornet2-nas-luci
+          git clone --depth 1 --branch master https://github.com/linkease/nas-packages.git /tmp/doornet2-nas-packages
+          mkdir -p package/doornet2-extra
+          cp -a /tmp/doornet2-nas-luci/luci/luci-app-quickstart package/doornet2-extra/
+          cp -a /tmp/doornet2-nas-packages/network/services/quickstart package/doornet2-extra/
+          # Pin the Lua/LEDE-compatible Argon version verified on this device.
+          while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name luci-theme-argon -prune)
+          git init package/doornet2-extra/luci-theme-argon
+          git -C package/doornet2-extra/luci-theme-argon remote add origin https://github.com/jerrykuku/luci-theme-argon.git
+          git -C package/doornet2-extra/luci-theme-argon fetch --depth 1 origin 98478b7767caebfafc458df3789f4a78d227a96a
+          git -C package/doornet2-extra/luci-theme-argon checkout --detach FETCH_HEAD
+          # The LuCI collection otherwise forces Bootstrap back on in defconfig.
+          python3 - <<'PYTHEME'
+          from pathlib import Path
+          p=Path('feeds/luci/collections/luci/Makefile')
+          s=p.read_text()
+          assert '+luci-theme-bootstrap' in s, 'LuCI collection changed; review theme dependency'
+          p.write_text(s.replace('+luci-theme-bootstrap', '+luci-theme-argon'))
+          PYTHEME
+          # Replace the old Go 1.23 recipe with the official monolithic Go 1.25.6 recipe.
+          git init /tmp/doornet2-go-feed
+          git -C /tmp/doornet2-go-feed remote add origin https://github.com/openwrt/packages.git
+          git -C /tmp/doornet2-go-feed sparse-checkout set lang/golang
+          git -C /tmp/doornet2-go-feed fetch --depth 1 origin dbaeeb38d3df5f7b8c78ff23e558d2eab5b0a895
+          git -C /tmp/doornet2-go-feed checkout --detach FETCH_HEAD
+          rm -rf feeds/packages/lang/golang
+          cp -a /tmp/doornet2-go-feed/lang/golang feeds/packages/lang/golang
+          # Xray 26.10.21 requires Go 1.27; use verified official source and bootstrap.
+          curl -fL --retry 5 https://go.dev/dl/go1.27.3.linux-amd64.tar.gz -o /tmp/doornet2-go-bootstrap.tar.gz
+          echo '65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40  /tmp/doornet2-go-bootstrap.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/doornet2-go-bootstrap
+          tar -xzf /tmp/doornet2-go-bootstrap.tar.gz -C /tmp/doornet2-go-bootstrap --strip-components=1
+          python3 - <<'PYGO'
+          from pathlib import Path
+          import re
+          p=Path('feeds/packages/lang/golang/golang/Makefile')
+          text=p.read_text().replace('GO_VERSION_MAJOR_MINOR:=1.25','GO_VERSION_MAJOR_MINOR:=1.27').replace('GO_VERSION_PATCH:=6','GO_VERSION_PATCH:=3')
+          text=re.sub(r'^PKG_HASH:=.*$', 'PKG_HASH:=6e7749035cf360f06b2575d162ea79df9fda8ef671889e5c375f8e50777f26bb',text,flags=re.M)
+          start=text.index('define Host/Compile')
+          end=text.index('endef',start)+len('endef')
+          host='define Host/Compile'+chr(10)+chr(9)+'$(call GoCompiler/Host/Make, GOROOT_BOOTSTRAP="/tmp/doornet2-go-bootstrap" $(HOST_GO_VARS))'+chr(10)+'endef'
+          text=text[:start]+host+text[end:]
+          p.write_text(text)
+          PYGO
+          # Replace obsolete Rust/CI LLVM downloads with maintained official recipes.
+          git init /tmp/doornet2-rust-feed
+          git -C /tmp/doornet2-rust-feed remote add origin https://github.com/openwrt/packages.git
+          git -C /tmp/doornet2-rust-feed sparse-checkout set lang/rust
+          git -C /tmp/doornet2-rust-feed fetch --depth 1 origin 5dfea3b4394b334546e0d0b446d8a65e6620882e
+          git -C /tmp/doornet2-rust-feed checkout --detach FETCH_HEAD
+          rm -rf feeds/packages/lang/rust
+          cp -a /tmp/doornet2-rust-feed/lang/rust feeds/packages/lang/rust
+          # This source tree names the toolchain root TOOLCHAIN_DIR.
+          sed -i 's/$(TOOLCHAIN_ROOT_DIR)/$(TOOLCHAIN_DIR)/g' feeds/packages/lang/rust/Makefile
+          grep -q 'llvm.download-ci-llvm=false' feeds/packages/lang/rust/Makefile
+          # Older rules.mk has no TARGET_LINKER; use its default GNU bfd linker.
+          sed -i 's/$(TARGET_LINKER)/$(if $(TARGET_LINKER),$(TARGET_LINKER),bfd)/g' feeds/packages/lang/rust/rust-values.mk
+          # Rust vendored crates ship real Cargo.toml.orig files covered by checksums.
+          # Preserve those inputs when the old generic patch script removes backups.
+          python3 - <<'PYRUST'
+          from pathlib import Path
+          p=Path('scripts/patch-kernel.sh')
+          s=p.read_text()
+          old="find $targetdir/ '(' -name '*.orig' -o -name '.*.orig' ')' -exec"
+          new="find $targetdir/ '(' -name '*.orig' -o -name '.*.orig' ')' ! -path '*/rustc-*-src/vendor/*' -exec"
+          assert old in s, 'patch cleanup rule changed; inspect before proceeding'
+          p.write_text(s.replace(old,new))
+          PYRUST
+          # Upstream SSR bundles configure as 0644; this old tree skips non-executables.
+          python3 - <<'PYSSR'
+          from pathlib import Path
+          p=Path('feeds/passwall_packages/shadowsocksr-libev/Makefile')
+          s=p.read_text()
+          assert 'define Build/Configure' not in s, 'SSR configure recipe changed; review compatibility hook'
+          anchor='TARGET_LDFLAGS += -Wl,--as-needed'
+          assert anchor in s, 'SSR recipe changed'
+          hook='define Build/Configure'+chr(10)
+          hook+=chr(9)+'chmod +x $(PKG_BUILD_DIR)/configure'+chr(10)
+          hook+=chr(9)+'$(call Build/Configure/Default)'+chr(10)
+          hook+=chr(9)+'test -s $(PKG_BUILD_DIR)/Makefile'+chr(10)+'endef'+chr(10)+chr(10)
+          p.write_text(s.replace(anchor,hook+anchor))
+          PYSSR
+          ./scripts/feeds install -a
+          ./scripts/feeds install -f -a -p passwall_packages
+          ./scripts/feeds install -f -p passwall_luci luci-app-passwall
+      - name: Refresh UU from official API and verify download
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYUU'
+          import urllib.request, json, hashlib, re
+          from pathlib import Path
+          info=json.load(urllib.request.urlopen('https://router.uu.163.com/api/plugin?type=openwrt-aarch64',timeout=60))
+          assert info['status']=='ok', info
+          data=None
+          for key in ('url','url_bak'):
+              url=info.get(key,'').replace('http://','https://',1)
+              if not url: continue
+              try:
+                  payload=urllib.request.urlopen(url,timeout=90).read()
+                  if hashlib.md5(payload).hexdigest()!=info['md5']: raise ValueError('UU checksum mismatch')
+                  data=payload
+                  break
+              except Exception as e: print('UU download retry:',type(e).__name__)
+          if data is None: raise RuntimeError('Official UU downloads unavailable')
+          version=re.search(r'/v([0-9.]+)/',url)[1]
+          sha=hashlib.sha256(data).hexdigest()
+          p=Path('feeds/packages/net/uugamebooster/Makefile')
+          text=p.read_text()
+          text=re.sub(r'^PKG_VERSION:=.*$', 'PKG_VERSION:='+version,text,flags=re.M)
+          text=re.sub(r'^  PKG_HASH:=.*$', '  PKG_HASH:='+sha,text,count=1,flags=re.M)
+          p.write_text(text)
+          Path('dl').mkdir(exist_ok=True)
+          Path('dl/uugamebooster-'+version+'-aarch64.tar.gz').write_bytes(data)
+          Path('build-metadata').mkdir(exist_ok=True)
+          Path('build-metadata/uu-source.txt').write_text('Official API: openwrt-aarch64\nVersion: '+version+'\nSHA256: '+sha+'\n')
+          print('Verified official UU',version,sha)
+          PYUU
+      - name: Configure DoorNet2 and verify all requested plugins
+        working-directory: openwrt
+        run: |
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_rockchip=y
+          CONFIG_TARGET_rockchip_armv8=y
+          CONFIG_TARGET_rockchip_armv8_DEVICE_embedfire_doornet2=y
+          CONFIG_TARGET_KERNEL_PARTSIZE=64
+          CONFIG_TARGET_ROOTFS_PARTSIZE=2048
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_mkf2fs=y
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_luci-proto-ppp=y
+          CONFIG
+          for app in passwall firewall turboacc uugamebooster quickstart store; do
+            echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
+          done
+          mkdir -p build-metadata
+          cp .config build-metadata/requested.config
+          make defconfig
+          python3 - <<'PYCONFIG'
+          from pathlib import Path
+          import re
+          allow=set('passwall firewall turboacc uugamebooster quickstart store'.split())
+          luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
+          blocked=set('odhcp6c odhcpd-ipv6only sqm-scripts miniupnpd cpufreq automount htop cfdisk autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
+          lines=Path('.config').read_text().splitlines()
+          result=[]
+          for line in lines:
+              m=re.match(r'CONFIG_PACKAGE_(.*?)=[ym]$',line)
+              if m and ((m[1] in luci_packages and m[1][9:] not in allow) or m[1] in blocked or (m[1].startswith('luci-theme-') and m[1] != 'luci-theme-argon')):
+                  line='# CONFIG_PACKAGE_'+m[1]+' is not set'
+              result.append(line)
+          for name in blocked:
+              if not any('CONFIG_PACKAGE_'+name+' ' in x or x.startswith('CONFIG_PACKAGE_'+name+'=') for x in result):
+                  result.append('# CONFIG_PACKAGE_'+name+' is not set')
+          Path('.config').write_text(chr(10).join(result)+chr(10))
+          PYCONFIG
+          make defconfig
+          cp .config build-metadata/resolved.config
+          ./scripts/diffconfig.sh > build-metadata/diffconfig
+          git rev-parse HEAD > build-metadata/source-revisions.txt
+          for f in feeds/*; do
+            if test -d "$f/.git"; then
+              echo "$f $(git -C "$f" rev-parse HEAD)" >> build-metadata/source-revisions.txt
+            fi
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          wanted=[x for x in Path('build-metadata/requested.config').read_text().splitlines() if x.startswith('CONFIG_PACKAGE_') and x.endswith('=y')]
+          actual=set(Path('.config').read_text().splitlines())
+          missing=[x for x in wanted if x not in actual]
+          Path('build-metadata/unavailable-packages.txt').write_text(chr(10).join(missing)+chr(10))
+          if missing:
+              raise SystemExit('Unavailable packages: '+', '.join(missing))
+          allowed=set('passwall firewall turboacc uugamebooster quickstart store'.split())
+          luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
+          unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_'):-2] in luci_packages and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
+          if unexpected:
+              raise SystemExit('Unexpected plugins in slim image: '+', '.join(unexpected))
+          themes=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-theme-') and x.endswith(('=y','=m')))
+          assert themes == ['CONFIG_PACKAGE_luci-theme-argon=y'], themes
+          forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba','sqm-scripts')
+          if any('CONFIG_PACKAGE_'+x+'=y' in actual for x in forbidden):
+              raise SystemExit('Unwanted Docker or sharing dependency selected')
+          PY
+      - name: Set hostname, Argon, LAN address and disable IPv6
+        working-directory: openwrt
+        run: |
+          mkdir -p files/etc/uci-defaults files/etc/sysctl.d
+          cat > files/etc/sysctl.d/99-disable-ipv6.conf <<'SYSCTL'
+          net.ipv6.conf.all.disable_ipv6=1
+          net.ipv6.conf.default.disable_ipv6=1
+          net.ipv6.conf.all.forwarding=0
+          net.ipv6.conf.default.forwarding=0
+          net.ipv6.conf.all.accept_ra=0
+          net.ipv6.conf.default.accept_ra=0
+          SYSCTL
+          cat > files/etc/uci-defaults/99-local-settings <<'UCI'
+          #!/bin/sh
+          uci set system.@system[0].hostname='DN2'
+          uci set luci.main.mediaurlbase='/luci-static/argon'
+          uci commit system
+          uci commit luci
+          uci set network.lan.ipaddr='192.168.11.1'
+          uci -q delete network.lan.ip6assign
+          uci -q delete network.globals.ula_prefix
+          uci set network.wan.ipv6='0'
+          uci set network.wan.delegate='0'
+          uci -q delete network.wan6
+          uci set dhcp.lan.ra='disabled'
+          uci set dhcp.lan.dhcpv6='disabled'
+          uci set dhcp.lan.ndp='disabled'
+          uci set dhcp.lan.ra_slaac='0'
+          uci -q delete dhcp.lan.ra_flags
+          uci set dhcp.@dnsmasq[0].filter_aaaa='1'
+          uci commit network
+          uci commit dhcp
+          /etc/init.d/odhcpd disable
+          exit 0
+          UCI
+          chmod +x files/etc/uci-defaults/99-local-settings
+      - name: Download
+        working-directory: openwrt
+        run: make download -j8
+      - name: Build
+        working-directory: openwrt
+        run: |
+          set -o pipefail
+          make -j2 V=s 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
+      - name: Verify images and record package versions
+        working-directory: openwrt
+        run: |
+          set -euo pipefail
+          target=bin/targets/rockchip/armv8
+          find "$target" -maxdepth 1 -type f -name '*embedfire_doornet2*.img*' | tee build-metadata/firmware-files.txt
+          test -s build-metadata/firmware-files.txt
+          test -s "$target/sha256sums"
+          manifest=$(find "$target" -maxdepth 1 -name '*embedfire_doornet2*.manifest' -print -quit)
+          test -n "$manifest"
+          # Fail before uploading if essential writable-overlay or theme packages are absent.
+          grep -q '^mkf2fs - ' "$manifest"
+          grep -q '^luci-theme-argon - 1.8.4-' "$manifest"
+          test "$(grep -c '^luci-theme-' "$manifest")" -eq 1
+          root=build_dir/target-aarch64_generic_musl/root-rockchip
+          test -x "$root/usr/sbin/mkfs.f2fs"
+          test -s "$root/usr/lib/lua/luci/view/themes/argon/header.htm"
+          grep -q '^kernel - 5.4.192-' "$manifest"
+          cp "$manifest" build-metadata/installed-packages.manifest
+          grep -E '^(luci-app-|luci-theme-|mkf2fs |xray-core |uugamebooster |ppp |ppp-mod-pppoe )' "$manifest" > build-metadata/plugin-versions.txt
+          {
+            echo '## DoorNet2 5.4 compatibility test'
+            echo 'Pinned vendor 5.4.192 baseline; fresh plugin feeds. Requires hardware throughput and CRC validation.'
+            echo 'Manual compatibility build. Existing daily workflow is unchanged.'
+            echo '### Package versions'
+            echo '```text'
+            cat build-metadata/plugin-versions.txt
+            echo '```'
+            echo 'Download the DoorNet2-5.4-firmware artifact; flash manually after review.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoorNet2-5.4-build-diagnostics
+          path: |
+            openwrt/build-metadata/
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 14
+      - name: Upload firmware and packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoorNet2-5.4-firmware
+          if-no-files-found: error
+          path: |
+            openwrt/bin/targets/rockchip/armv8/
+            openwrt/bin/packages/
+          retention-days: 14
