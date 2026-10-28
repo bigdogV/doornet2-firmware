@@ -291,24 +291,31 @@ jobs:
       - name: Verify images and record package versions
         working-directory: openwrt
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          trap 'echo "Artifact verification failed at line $LINENO: $BASH_COMMAND" >&2' ERR
           target=bin/targets/rockchip/armv8
           find "$target" -maxdepth 1 -type f -name '*embedfire_doornet2*.img*' | tee build-metadata/firmware-files.txt
           test -s build-metadata/firmware-files.txt
           test -s "$target/sha256sums"
           manifest=$(find "$target" -maxdepth 1 -name '*embedfire_doornet2*.manifest' -print -quit)
           test -n "$manifest"
+          cp "$manifest" build-metadata/installed-packages.manifest
+          cp "$target/sha256sums" build-metadata/sha256sums
+          ls -lh "$target"
           # Fail before uploading if essential writable-overlay or theme packages are absent.
           grep -q '^mkf2fs - ' "$manifest"
           grep -q '^luci-app-upnp - ' "$manifest"
           grep -q '^miniupnpd - ' "$manifest"
-          grep -q '^luci-theme-argon - 1.8.4-' "$manifest"
+          # Pinned Argon uses LuCI's git-derived package version on this tree.
+          argon_revision=$(git -C package/doornet2-extra/luci-theme-argon rev-parse HEAD)
+          test "$argon_revision" = '98478b7767caebfafc458df3789f4a78d227a96a'
+          printf '%s\n' "$argon_revision" > build-metadata/argon-source-revision.txt
+          grep -Eq '^luci-theme-argon - (git-[0-9.]+-98478b7-|1[.]8[.]4-)[^[:space:]]+$' "$manifest"
           test "$(grep -c '^luci-theme-' "$manifest")" -eq 1
           root=build_dir/target-aarch64_generic_musl/root-rockchip
           test -x "$root/usr/sbin/mkfs.f2fs"
           test -s "$root/usr/lib/lua/luci/view/themes/argon/header.htm"
           grep -q '^kernel - 5.4.192-' "$manifest"
-          cp "$manifest" build-metadata/installed-packages.manifest
           grep -E '^(luci-app-|luci-theme-|mkf2fs |xray-core |uugamebooster |ppp |ppp-mod-pppoe )' "$manifest" > build-metadata/plugin-versions.txt
           {
             echo '## DoorNet2 5.4 compatibility test'
@@ -329,6 +336,9 @@ jobs:
             openwrt/build-metadata/
             openwrt/build.log
             openwrt/logs/
+            openwrt/bin/targets/rockchip/armv8/*.manifest
+            openwrt/bin/targets/rockchip/armv8/sha256sums
+            openwrt/bin/targets/rockchip/armv8/profiles.json
           retention-days: 14
       - name: Upload firmware and packages
         uses: actions/upload-artifact@v4
