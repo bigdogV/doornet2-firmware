@@ -38,6 +38,20 @@ jobs:
           mkdir -p package/doornet2-extra
           cp -a /tmp/doornet2-nas-luci/luci/luci-app-quickstart package/doornet2-extra/
           cp -a /tmp/doornet2-nas-packages/network/services/quickstart package/doornet2-extra/
+          # Pin the Lua/LEDE-compatible Argon version verified on this device.
+          while IFS= read -r path; do rm -rf -- "$path"; done < <(find package feeds -type d -name luci-theme-argon -prune)
+          git init package/doornet2-extra/luci-theme-argon
+          git -C package/doornet2-extra/luci-theme-argon remote add origin https://github.com/jerrykuku/luci-theme-argon.git
+          git -C package/doornet2-extra/luci-theme-argon fetch --depth 1 origin 98478b7767caebfafc458df3789f4a78d227a96a
+          git -C package/doornet2-extra/luci-theme-argon checkout --detach FETCH_HEAD
+          # The LuCI collection otherwise forces Bootstrap back on in defconfig.
+          python3 - <<'PYTHEME'
+          from pathlib import Path
+          p=Path('feeds/luci/collections/luci/Makefile')
+          s=p.read_text()
+          assert '+luci-theme-bootstrap' in s, 'LuCI collection changed; review theme dependency'
+          p.write_text(s.replace('+luci-theme-bootstrap', '+luci-theme-argon'))
+          PYTHEME
           # Replace the old Go 1.23 recipe with the official monolithic Go 1.25.6 recipe.
           git init /tmp/doornet2-go-feed
           git -C /tmp/doornet2-go-feed remote add origin https://github.com/openwrt/packages.git
@@ -153,6 +167,8 @@ jobs:
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_xray-core=y
           CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_mkf2fs=y
+          CONFIG_PACKAGE_luci-theme-argon=y
           CONFIG_PACKAGE_ppp=y
           CONFIG_PACKAGE_ppp-mod-pppoe=y
           CONFIG_PACKAGE_luci-proto-ppp=y
@@ -168,12 +184,12 @@ jobs:
           import re
           allow=set('passwall firewall turboacc uugamebooster quickstart store'.split())
           luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
-          blocked=set('odhcp6c odhcpd-ipv6only sqm-scripts miniupnpd cpufreq automount htop cfdisk mkf2fs autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
+          blocked=set('odhcp6c odhcpd-ipv6only sqm-scripts miniupnpd cpufreq automount htop cfdisk autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
           lines=Path('.config').read_text().splitlines()
           result=[]
           for line in lines:
               m=re.match(r'CONFIG_PACKAGE_(.*?)=[ym]$',line)
-              if m and ((m[1] in luci_packages and m[1][9:] not in allow) or m[1] in blocked):
+              if m and ((m[1] in luci_packages and m[1][9:] not in allow) or m[1] in blocked or (m[1].startswith('luci-theme-') and m[1] != 'luci-theme-argon')):
                   line='# CONFIG_PACKAGE_'+m[1]+' is not set'
               result.append(line)
           for name in blocked:
@@ -204,11 +220,13 @@ jobs:
           unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_'):-2] in luci_packages and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
           if unexpected:
               raise SystemExit('Unexpected plugins in slim image: '+', '.join(unexpected))
+          themes=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-theme-') and x.endswith(('=y','=m')))
+          assert themes == ['CONFIG_PACKAGE_luci-theme-argon=y'], themes
           forbidden=('dockerd','docker','docker-compose','containerd','runc','autosamba','sqm-scripts')
           if any('CONFIG_PACKAGE_'+x+'=y' in actual for x in forbidden):
               raise SystemExit('Unwanted Docker or sharing dependency selected')
           PY
-      - name: Set LAN address and disable IPv6
+      - name: Set hostname, Argon, LAN address and disable IPv6
         working-directory: openwrt
         run: |
           mkdir -p files/etc/uci-defaults files/etc/sysctl.d
@@ -222,6 +240,10 @@ jobs:
           SYSCTL
           cat > files/etc/uci-defaults/99-local-settings <<'UCI'
           #!/bin/sh
+          uci set system.@system[0].hostname='DN2'
+          uci set luci.main.mediaurlbase='/luci-static/argon'
+          uci commit system
+          uci commit luci
           uci set network.lan.ipaddr='192.168.11.1'
           uci -q delete network.lan.ip6assign
           uci -q delete network.globals.ula_prefix
@@ -258,8 +280,15 @@ jobs:
           test -s "$target/sha256sums"
           manifest=$(find "$target" -maxdepth 1 -name '*embedfire_doornet2*.manifest' -print -quit)
           test -n "$manifest"
+          # Fail before uploading if essential writable-overlay or theme packages are absent.
+          grep -q '^mkf2fs - ' "$manifest"
+          grep -q '^luci-theme-argon - 1.8.4-' "$manifest"
+          test "$(grep -c '^luci-theme-' "$manifest")" -eq 1
+          root=build_dir/target-aarch64_generic_musl/root-rockchip
+          test -x "$root/usr/sbin/mkfs.f2fs"
+          test -s "$root/usr/lib/lua/luci/view/themes/argon/header.htm"
           cp "$manifest" build-metadata/installed-packages.manifest
-          grep -E '^(luci-app-|xray-core |uugamebooster |ppp |ppp-mod-pppoe )' "$manifest" > build-metadata/plugin-versions.txt
+          grep -E '^(luci-app-|luci-theme-|mkf2fs |xray-core |uugamebooster |ppp |ppp-mod-pppoe )' "$manifest" > build-metadata/plugin-versions.txt
           {
             echo '## DoorNet2 daily build'
             echo 'Sources and plugin feeds were fetched fresh for this run.'
