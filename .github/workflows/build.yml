@@ -74,6 +74,17 @@ jobs:
           # This source tree names the toolchain root TOOLCHAIN_DIR.
           sed -i 's/$(TOOLCHAIN_ROOT_DIR)/$(TOOLCHAIN_DIR)/g' feeds/packages/lang/rust/Makefile
           grep -q 'llvm.download-ci-llvm=false' feeds/packages/lang/rust/Makefile
+          # Rust vendored crates ship real Cargo.toml.orig files covered by checksums.
+          # Preserve those inputs when the old generic patch script removes backups.
+          python3 - <<'PYRUST'
+          from pathlib import Path
+          p=Path('scripts/patch-kernel.sh')
+          s=p.read_text()
+          old="find $targetdir/ '(' -name '*.orig' -o -name '.*.orig' ')' -exec"
+          new="find $targetdir/ '(' -name '*.orig' -o -name '.*.orig' ')' ! -path '*/rustc-*-src/vendor/*' -exec"
+          assert old in s, 'patch cleanup rule changed; inspect before proceeding'
+          p.write_text(s.replace(old,new))
+          PYRUST
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
