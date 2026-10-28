@@ -1,0 +1,89 @@
+name: Publish verified DoorNet2 build
+on:
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: publish-doornet2-r13
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: '40656925419'
+      BUILD_SHA: f441f18c3f3659c188b137a0ddce7c18dd46e8b2
+      RELEASE_TAG: doornet2-2026.10.28-r13
+    steps:
+      - name: Download successful build and verify firmware
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > run.json
+          python3 - <<'PY'
+          import json, os
+          run=json.load(open('run.json'))
+          assert run['conclusion']=='success'
+          assert run['head_sha']==os.environ['BUILD_SHA']
+          assert run['path']=='.github/workflows/build.yml'
+          PY
+          gh run download "$BUILD_RUN" --name DoorNet2-firmware --dir firmware
+          target=firmware/targets/rockchip/armv8
+          test -s "$target/sha256sums"
+          (cd "$target" && sha256sum --check sha256sums)
+          for kind in squashfs ext4; do
+            image="$target/openwrt-rockchip-armv8-embedfire_doornet2-$kind-sysupgrade.img.gz"
+            test -s "$image"
+            gzip -t "$image"
+          done
+          manifest="$target/openwrt-rockchip-armv8-embedfire_doornet2.manifest"
+          test -s "$manifest"
+          mkdir release-assets
+          cp "$target"/*embedfire_doornet2*.img.gz "$manifest" release-assets/
+          for info in version.buildinfo config.buildinfo feeds.buildinfo profiles.json; do
+            if test -f "$target/$info"; then cp "$target/$info" release-assets/; fi
+          done
+          (cd release-assets && sha256sum * > sha256sums)
+          {
+            echo '# DoorNet2 固件 · 2026-10-28'
+            echo
+            echo '适用设备：EmbedFire DoorNet2（RK3399）。来源：DHDAXCW/lede-rockchip stable。'
+            echo '第13轮编译成功产物，未重新编译；镜像 SHA256 与 gzip 完整性复核通过。'
+            echo '管理地址：192.168.11.1；IPv6 已配置禁用。保留 PPPoE、DHCP/DNS、SSH。'
+            echo '包含 PassWall、防火墙、TurboACC、UU、QuickStart 和 iStore。'
+            echo
+            echo '## 实际版本（来自镜像 manifest）'
+            echo '```text'
+            grep -E '^(kernel |base-files |luci-app-|quickstart |xray-core |uugamebooster |ppp |ppp-mod-pppoe )' "$manifest"
+            echo '```'
+            echo
+            echo '**已知限制：Xray 实际为 24.11.30-1，并非预期的新版；不能称为所有组件最新。固件尚未进行 DoorNet2 实机测试，因此标记为预发布。**'
+            echo
+            echo '提供 squashfs 与 ext4 两种 sysupgrade.img.gz，以及完整包清单、构建信息和 sha256sums。请下载其中一种镜像并核对 SHA256。'
+            echo '未包含私人宽带账号或代理节点配置；请自行配置。不会自动刷写设备。'
+            echo
+            echo "构建记录：https://github.com/$GH_REPO/actions/runs/$BUILD_RUN"
+          } > release-notes.md
+      - name: Publish release with verified assets
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --target "$BUILD_SHA" \
+            --title 'DoorNet2 2026.10.28 · 第13轮测试固件' \
+            --notes-file release-notes.md --draft --prerelease
+          gh release edit "$RELEASE_TAG" --draft=false
+          gh release view "$RELEASE_TAG" --json url,assets,isDraft,isPrerelease > release.json
+          python3 - <<'PY'
+          import json
+          r=json.load(open('release.json'))
+          assert not r['isDraft']
+          names={a['name'] for a in r['assets']}
+          assert 'sha256sums' in names
+          assert any('squashfs-sysupgrade.img.gz' in x for x in names)
+          assert any('ext4-sysupgrade.img.gz' in x for x in names)
+          assert any(x.endswith('.manifest') for x in names)
+          print(r['url'])
+          PY
+          gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
