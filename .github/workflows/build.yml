@@ -74,6 +74,8 @@ jobs:
           # This source tree names the toolchain root TOOLCHAIN_DIR.
           sed -i 's/$(TOOLCHAIN_ROOT_DIR)/$(TOOLCHAIN_DIR)/g' feeds/packages/lang/rust/Makefile
           grep -q 'llvm.download-ci-llvm=false' feeds/packages/lang/rust/Makefile
+          # Older rules.mk has no TARGET_LINKER; use its default GNU bfd linker.
+          sed -i 's/$(TARGET_LINKER)/$(if $(TARGET_LINKER),$(TARGET_LINKER),bfd)/g' feeds/packages/lang/rust/rust-values.mk
           # Rust vendored crates ship real Cargo.toml.orig files covered by checksums.
           # Preserve those inputs when the old generic patch script removes backups.
           python3 - <<'PYRUST'
@@ -231,7 +233,7 @@ jobs:
         working-directory: openwrt
         run: |
           set -o pipefail
-          make -j2 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
+          make -j2 V=s 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
       - name: Verify images and record package versions
         working-directory: openwrt
         run: |
