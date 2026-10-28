@@ -87,6 +87,20 @@ jobs:
           assert old in s, 'patch cleanup rule changed; inspect before proceeding'
           p.write_text(s.replace(old,new))
           PYRUST
+          # Upstream SSR bundles configure as 0644; this old tree skips non-executables.
+          python3 - <<'PYSSR'
+          from pathlib import Path
+          p=Path('feeds/passwall_packages/shadowsocksr-libev/Makefile')
+          s=p.read_text()
+          assert 'define Build/Configure' not in s, 'SSR configure recipe changed; review compatibility hook'
+          anchor='TARGET_LDFLAGS += -Wl,--as-needed'
+          assert anchor in s, 'SSR recipe changed'
+          hook='define Build/Configure'+chr(10)
+          hook+=chr(9)+'chmod +x $(PKG_BUILD_DIR)/configure'+chr(10)
+          hook+=chr(9)+'$(call Build/Configure/Default)'+chr(10)
+          hook+=chr(9)+'test -s $(PKG_BUILD_DIR)/Makefile'+chr(10)+'endef'+chr(10)+chr(10)
+          p.write_text(s.replace(anchor,hook+anchor))
+          PYSSR
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
