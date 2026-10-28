@@ -168,12 +168,13 @@ jobs:
           CONFIG_PACKAGE_xray-core=y
           CONFIG_PACKAGE_e2fsprogs=y
           CONFIG_PACKAGE_mkf2fs=y
+          CONFIG_PACKAGE_miniupnpd=y
           CONFIG_PACKAGE_luci-theme-argon=y
           CONFIG_PACKAGE_ppp=y
           CONFIG_PACKAGE_ppp-mod-pppoe=y
           CONFIG_PACKAGE_luci-proto-ppp=y
           CONFIG
-          for app in passwall firewall turboacc uugamebooster quickstart store; do
+          for app in passwall firewall turboacc uugamebooster quickstart store upnp; do
             echo "CONFIG_PACKAGE_luci-app-$app=y" >> .config
           done
           mkdir -p build-metadata
@@ -182,9 +183,9 @@ jobs:
           python3 - <<'PYCONFIG'
           from pathlib import Path
           import re
-          allow=set('passwall firewall turboacc uugamebooster quickstart store'.split())
+          allow=set('passwall firewall turboacc uugamebooster quickstart store upnp'.split())
           luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
-          blocked=set('odhcp6c odhcpd-ipv6only sqm-scripts miniupnpd cpufreq automount htop cfdisk autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
+          blocked=set('odhcp6c odhcpd-ipv6only sqm-scripts cpufreq automount htop cfdisk autosamba docker dockerd docker-compose containerd runc cgroupfs-mount samba4-server samba4-client nfs-kernel-server nfs-kernel-server-utils minidlna aria2 transmission-daemon qbittorrent rclone vsftpd vsftpd-alt openvpn-openssl openvpn-mbedtls strongswan-full pptpd softethervpn5-server zerotier wireguard-tools'.split())
           lines=Path('.config').read_text().splitlines()
           result=[]
           for line in lines:
@@ -215,7 +216,7 @@ jobs:
           Path('build-metadata/unavailable-packages.txt').write_text(chr(10).join(missing)+chr(10))
           if missing:
               raise SystemExit('Unavailable packages: '+', '.join(missing))
-          allowed=set('passwall firewall turboacc uugamebooster quickstart store'.split())
+          allowed=set('passwall firewall turboacc uugamebooster quickstart store upnp'.split())
           luci_packages=set(re.findall(r'^Package: (luci-app-\S+)$',Path('tmp/.packageinfo').read_text(),re.M))
           unexpected=sorted(x for x in actual if x.startswith('CONFIG_PACKAGE_luci-app-') and x.endswith('=y') and x[len('CONFIG_PACKAGE_'):-2] in luci_packages and x[len('CONFIG_PACKAGE_luci-app-'):-2] not in allowed)
           if unexpected:
@@ -282,6 +283,8 @@ jobs:
           test -n "$manifest"
           # Fail before uploading if essential writable-overlay or theme packages are absent.
           grep -q '^mkf2fs - ' "$manifest"
+          grep -q '^luci-app-upnp - ' "$manifest"
+          grep -q '^miniupnpd - ' "$manifest"
           grep -q '^luci-theme-argon - 1.8.4-' "$manifest"
           test "$(grep -c '^luci-theme-' "$manifest")" -eq 1
           root=build_dir/target-aarch64_generic_musl/root-rockchip
