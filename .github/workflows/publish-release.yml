@@ -43,16 +43,24 @@ jobs:
           from pathlib import Path
           for p in Path('firmware/targets/rockchip/armv8').glob('*embedfire_doornet2*.img.gz'):
               data=p.read_bytes()
-              magic, crc, kind, size=struct.unpack('>IIB3xI',data[-16:])
-              assert magic==0x46577830 and kind==1 and 24<=size<len(data), p
-              assert (zlib.crc32(data[:-16]) ^ 0xffffffff)==crc, 'fwtool CRC mismatch'
-              meta=data[-size:-16]
-              assert meta[:8]==bytes(8), 'unexpected fwtool metadata header'
-              info=json.loads(meta[8:])
-              assert any('doornet2' in x for x in info['supported_devices']), info
-              with gzip.GzipFile(fileobj=io.BytesIO(data[:-size])) as image:
+              metadata_seen=False
+              trailers=0
+              while len(data)>=16 and data[-16:-12]==b'FWx0':
+                  magic, crc, kind, size=struct.unpack('>IIB3xI',data[-16:])
+                  assert kind in (0,1) and 16<size<len(data), (p,kind,size)
+                  assert (zlib.crc32(data[:-16]) ^ 0xffffffff)==crc, 'fwtool CRC mismatch'
+                  payload=data[-size:-16]
+                  if kind==1:
+                      assert payload[:8]==bytes(8), 'unexpected fwtool metadata header'
+                      info=json.loads(payload[8:])
+                      assert any('doornet2' in x for x in info['supported_devices']), info
+                      metadata_seen=True
+                  data=data[:-size]
+                  trailers+=1
+              assert metadata_seen, 'DoorNet2 upgrade metadata missing'
+              with gzip.GzipFile(fileobj=io.BytesIO(data)) as image:
                   while image.read(1024*1024): pass
-              print(p.name, 'gzip and DoorNet2 fwtool metadata verified')
+              print(p.name, 'gzip and DoorNet2 metadata verified;', trailers, 'fwtool trailers checked')
           PYIMAGE
           manifest="$target/openwrt-rockchip-armv8-embedfire_doornet2.manifest"
           test -s "$manifest"
