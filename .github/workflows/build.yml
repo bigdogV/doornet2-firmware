@@ -63,6 +63,17 @@ jobs:
           text=text[:start]+host+text[end:]
           p.write_text(text)
           PYGO
+          # Replace obsolete Rust/CI LLVM downloads with maintained official recipes.
+          git init /tmp/doornet2-rust-feed
+          git -C /tmp/doornet2-rust-feed remote add origin https://github.com/openwrt/packages.git
+          git -C /tmp/doornet2-rust-feed sparse-checkout set lang/rust
+          git -C /tmp/doornet2-rust-feed fetch --depth 1 origin 5dfea3b4394b334546e0d0b446d8a65e6620882e
+          git -C /tmp/doornet2-rust-feed checkout --detach FETCH_HEAD
+          rm -rf feeds/packages/lang/rust
+          cp -a /tmp/doornet2-rust-feed/lang/rust feeds/packages/lang/rust
+          # This source tree names the toolchain root TOOLCHAIN_DIR.
+          sed -i 's/$(TOOLCHAIN_ROOT_DIR)/$(TOOLCHAIN_DIR)/g' feeds/packages/lang/rust/Makefile
+          grep -q 'llvm.download-ci-llvm=false' feeds/packages/lang/rust/Makefile
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
           ./scripts/feeds install -f -p passwall_luci luci-app-passwall
